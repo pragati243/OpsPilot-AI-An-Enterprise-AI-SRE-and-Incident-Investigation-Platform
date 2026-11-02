@@ -1,0 +1,75 @@
+# OpsPilot AI
+
+**An Enterprise AI SRE and Incident Investigation Platform.**
+
+When a production service fails, engineers need to inspect logs, search
+documentation, review old incidents, determine root cause, and decide what to
+do next. OpsPilot is an AI investigation assistant that gathers evidence from
+authorized tools, retrieves relevant runbooks, recalls verified historical
+resolutions, and prepares an incident report with suggested next steps —
+backed by a controlled LangGraph workflow, durable cross-session memory, RAG
+with citations, and full Langfuse observability.
+
+The full design — architecture, memory system, agent workflow, tool
+contracts, evaluation plan — lives in [`docs/architecture.md`](docs/architecture.md).
+This repository is built strictly phase-by-phase against that spec.
+
+## Build status
+
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Repo scaffold, git, architecture doc | ✅ Done |
+| 1 | FastAPI backend foundation, DB, auth | ✅ Done |
+| 2 | Simulated prod environment + tool layer | ⏳ Next |
+| 3 | LangGraph agent workflow (Groq) | Not started |
+| 4 | RAG / retrieval | Not started |
+| 5 | Memory system | Not started |
+| 6 | Langfuse observability | Not started |
+| 7 | API completion (SSE, rate limiting) | Not started |
+| 8 | React + TypeScript dashboard | Not started |
+| 9 | MCP server | Not started |
+| 10 | Evaluation suite + CI quality gate | Not started |
+| 11 | Docker / CI/CD / deployment | Not started |
+
+## Repository layout
+
+```
+apps/api/        FastAPI backend: core, db, models, schemas, repositories,
+                  services, api/v1, (agents/memory/retrieval/tools land in
+                  later phases)
+apps/mcp-server/ MCP server exposing diagnostic tools as resources
+apps/web/        React + TypeScript dashboard
+packages/        Shared schemas used across apps
+evals/           Golden dataset, evaluators, eval runner
+infra/           Docker and provisioning scripts
+docs/            Architecture, threat model, evaluation report, deployment
+```
+
+## Local development
+
+Prerequisites: Docker Desktop, Python 3.12+, [uv](https://docs.astral.sh/uv/).
+
+```bash
+cp .env.example .env          # fill in real secrets; defaults work for local dev
+uv sync --all-groups          # install Python deps into .venv
+make up                       # Postgres (+pgvector) and Redis via docker-compose
+make migrate                  # apply Alembic migrations
+make dev                      # run the API with autoreload on :8000
+```
+
+Run the test suite (spins up an ephemeral, tmpfs-backed test Postgres):
+
+```bash
+make test
+```
+
+> **Note for this dev machine specifically:** `docker-compose.yml` maps
+> Postgres/Redis to non-default host ports (5544/5545/6399) because this
+> machine already runs a native Postgres service on 5432, a native Memurai
+> (Redis-compatible) service on 6379, and a WSL relay on 5433. If you're on a
+> clean machine without those, feel free to remap to the standard ports.
+
+Other useful targets: `make lint` (ruff), `make typecheck` (mypy), `make revision m="..."`
+(new Alembic migration). See the [`Makefile`](Makefile) for the full list.
+
+Further setup instructions will be filled in as each phase lands.
