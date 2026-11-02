@@ -1,0 +1,60 @@
+# Host ports are deliberately non-default (5544/5545/6399): this dev machine
+# already runs a native Postgres service on 5432, a native Memurai (Redis)
+# service on 6379, and something via the WSL relay on 5433. Remapping avoids
+# fighting those pre-existing services instead of risking touching them.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: opspilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opspilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opspilot}
+      POSTGRES_DB: ${POSTGRES_DB:-opspilot}
+    ports:
+      - "5544:5432"
+    volumes:
+      - opspilot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opspilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: opspilot-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: opspilot
+      POSTGRES_PASSWORD: opspilot
+      POSTGRES_DB: opspilot_test
+    ports:
+      - "5545:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opspilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    profiles:
+      - test
+
+  redis:
+    image: redis:7-alpine
+    container_name: opspilot-redis
+    restart: unless-stopped
+    ports:
+      - "6399:6379"
+    volumes:
+      - opspilot_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  opspilot_pgdata:
+  opspilot_redisdata:
