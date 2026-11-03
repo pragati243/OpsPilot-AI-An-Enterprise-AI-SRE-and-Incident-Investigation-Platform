@@ -21,8 +21,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 0 | Repo scaffold, git, architecture doc | ✅ Done |
 | 1 | FastAPI backend foundation, DB, auth | ✅ Done |
 | 2 | Simulated prod environment + tool layer | ✅ Done |
-| 3 | LangGraph agent workflow (Groq) | ⏳ Next |
-| 4 | RAG / retrieval | Not started |
+| 3 | LangGraph agent workflow (Groq) | ✅ Done |
+| 4 | RAG / retrieval | ⏳ Next |
 | 5 | Memory system | Not started |
 | 6 | Langfuse observability | Not started |
 | 7 | API completion (SSE, rate limiting) | Not started |
@@ -35,8 +35,8 @@ This repository is built strictly phase-by-phase against that spec.
 
 ```
 apps/api/        FastAPI backend: core, db, models, schemas, repositories,
-                  services, api/v1, tools (+ simulator), guardrails
-                  (agents/memory/retrieval land in later phases)
+                  api/v1, tools (+ simulator), guardrails, agents
+                  (memory/retrieval land in later phases)
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
 apps/web/        React + TypeScript dashboard
 packages/        Shared schemas used across apps
@@ -83,10 +83,42 @@ resolved incident. The seven tool contracts from the spec
 (`get_service_health`, `query_logs`, `get_service_metrics`,
 `search_runbooks`, `search_past_incidents`, `create_incident_report`,
 `propose_remediation`) are implemented in `apps/api/app/tools/` as plain,
-directly-callable async functions over that data — no agent wires them up
-yet (Phase 3), but they're fully tested and runnable today. Every call is
-policy-checked and audit-logged via `apps/api/app/guardrails/tool_policy.py`;
-`propose_remediation` additionally runs through an action allowlist and
-always lands as `pending_approval` — it can never execute anything itself.
+directly-callable async functions over that data, fully tested independent
+of any agent. Every call is policy-checked and audit-logged via
+`apps/api/app/guardrails/tool_policy.py`; `propose_remediation` additionally
+runs through an action allowlist and always lands as `pending_approval` —
+it can never execute anything itself.
+
+### Agent workflow
+
+`apps/api/app/agents/` is a LangGraph state machine: **intake** (validates
+the incident belongs to the caller's tenant before any model call) →
+**plan** (bounded hypothesis + tool-call plan) → **agent/execute_tools**
+(ReAct-style loop over the five read-only tools, hard-capped by
+`max_tool_calls` and `max_gather_iterations`) → **assess** (confidence +
+missing-evidence gate) → **report** (structured diagnosis, which the *app*
+— not the model — then deterministically persists via
+`create_incident_report` and, for any recommended action that passes the
+allowlist, `propose_remediation`). The LLM never calls the two mutating
+tools directly; it can only produce a structured report that app code acts
+on. All four LLM calls per node (plan/gather/assess/report) go through a
+narrow `AgentLLM` protocol (`apps/api/app/agents/llm_client.py`), so the
+whole graph is tested deterministically with a scripted fake
+(`apps/api/tests/fakes.py`) and never needs a real `GROQ_API_KEY` in CI.
+
+Try it once the API is running and seeded:
+
+```bash
+curl -X POST http://localhost:8010/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@demo-corp.io","password":"demo-password-change-me"}'
+# then, with the returned access_token:
+curl -X POST http://localhost:8010/api/v1/incidents/<incident_id>/investigate \
+  -H "Authorization: Bearer <token>"
+```
+
+This requires a real `GROQ_API_KEY` in `.env` (Groq's OpenAI-compatible
+endpoint, configured in `app/agents/llm_client.py::build_groq_llm`) — the
+test suite doesn't need one, but hitting the live endpoint does.
 
 Further setup instructions will be filled in as each phase lands.

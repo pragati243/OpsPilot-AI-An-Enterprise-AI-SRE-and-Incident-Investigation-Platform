@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.llm_client import AgentLLM, build_groq_llm
 from app.core.security import InvalidTokenError, TokenType, decode_token
 from app.db.session import get_db
 from app.models.user import User, UserRole
@@ -46,6 +47,17 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def get_agent_llm() -> AgentLLM:
+    """Separate dependency (rather than building it inline in each route) so
+    tests can override this with a scripted fake and never need a real
+    GROQ_API_KEY to exercise the investigation endpoint.
+    """
+    return build_groq_llm()
+
+
+AgentLLMDep = Annotated[AgentLLM, Depends(get_agent_llm)]
 
 
 def require_role(

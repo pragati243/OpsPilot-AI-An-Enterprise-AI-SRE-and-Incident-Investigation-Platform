@@ -12,8 +12,10 @@ logs: ## Tail infra container logs
 sync: ## Install/sync Python dependencies into .venv
 	uv sync --all-groups
 
+# Port 8010, not 8000: this dev machine already runs another project's
+# backend container on 8000.
 dev: ## Run the FastAPI app with autoreload
-	uv run uvicorn app.main:app --reload --app-dir apps/api --port 8000
+	uv run uvicorn app.main:app --reload --app-dir apps/api --port 8010
 
 migrate: ## Apply Alembic migrations
 	cd apps/api && uv run --project .. alembic upgrade head
