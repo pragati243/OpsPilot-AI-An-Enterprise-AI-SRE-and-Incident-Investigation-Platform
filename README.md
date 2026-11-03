@@ -23,8 +23,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 2 | Simulated prod environment + tool layer | ✅ Done |
 | 3 | LangGraph agent workflow (Groq) | ✅ Done |
 | 4 | RAG / retrieval | ✅ Done |
-| 5 | Memory system | ⏳ Next |
-| 6 | Langfuse observability | Not started |
+| 5 | Memory system | ✅ Done |
+| 6 | Langfuse observability | ⏳ Next |
 | 7 | API completion (SSE, rate limiting) | Not started |
 | 8 | React + TypeScript dashboard | Not started |
 | 9 | MCP server | Not started |
@@ -35,8 +35,8 @@ This repository is built strictly phase-by-phase against that spec.
 
 ```
 apps/api/        FastAPI backend: core, db, models, schemas, repositories,
-                  api/v1, tools (+ simulator), guardrails, agents, retrieval
-                  (memory lands in a later phase)
+                  api/v1, tools (+ simulator), guardrails, agents, retrieval,
+                  memory
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
 apps/web/        React + TypeScript dashboard
 packages/        Shared schemas used across apps
@@ -140,5 +140,48 @@ embedding at write time — there's no path that creates a Document without
 one. See `apps/api/tests/test_tools_knowledge.py` for the test that proves
 the point: a query sharing zero literal words with a runbook still finds it
 (and a genuinely unrelated query correctly finds nothing).
+
+### Memory system
+
+`apps/api/app/memory/` is long-term memory distinct from the LangGraph
+checkpointer (conversation/workflow state within one run) — knowledge
+reused across separate investigations. Four pieces:
+
+- **Policy** (`policy.py`) — a deterministic gate every memory write passes
+  through regardless of what the extraction LLM was told: content-length
+  bounds, regex backstops against secret/credential-shaped text and
+  prompt-injection-shaped text, and profile-ownership checks. This runs
+  whether a successful prompt injection got past the extraction prompt or
+  not — it's a second, independent line of defense.
+- **Extraction** (`extraction.py`) — after a report is finalized (never
+  before — nothing gets written to memory from unverified tool output), an
+  LLM call proposes a few general, reusable facts (architecture facts,
+  confirmed fixes). Semantic/procedural memory only; profile memory is
+  explicitly set by the user (`PUT /api/v1/memories/profile`) since there's
+  no chat signal yet to infer it from.
+- **Supersession** (`write.py`) — a new fact whose embedding is a
+  near-duplicate (cosine similarity ≥ 0.92) of an existing active memory in
+  the same scope replaces it rather than creating a duplicate; the old
+  record is marked `superseded` with a pointer to the new one, never
+  deleted outright.
+- **Recall** (`recall.py`) — tenant/user/status filtering (authorization)
+  always happens first in SQL; only records that already passed it get
+  ranked by embedding similarity. A memory can never surface just because
+  it's a close vector match to an unauthorized caller.
+
+This closes the loop on the spec's worked example end to end, covered by
+`test_monday_friday_scenario_recalls_and_supersedes_memory` and
+`test_plan_prompt_includes_recalled_memory_with_verify_instruction` in
+`apps/api/tests/test_agent_graph.py`: a Monday incident gets investigated
+and a fact about the service is extracted into memory; a Friday incident
+on the same service recalls that fact into the **plan** node's prompt,
+explicitly framed as something to verify against current evidence, never
+assume; resolving it the same way supersedes the memory rather than
+duplicating it. Separately, a user's stated report-style preference
+(`PUT /api/v1/memories/profile`) is recalled into the **report** node,
+giving the "engineer prefers concise reports with evidence first" example
+from the spec a real, working path. Users can inspect
+(`GET /api/v1/memories`), correct (`PATCH .../{id}`), and delete
+(`DELETE .../{id}`) their own memories.
 
 Further setup instructions will be filled in as each phase lands.

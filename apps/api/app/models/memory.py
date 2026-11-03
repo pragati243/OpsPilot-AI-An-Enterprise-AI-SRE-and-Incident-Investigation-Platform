@@ -2,11 +2,13 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, ForeignKey, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.document import EMBEDDING_DIMENSION
 
 
 class MemoryType(StrEnum):
@@ -31,9 +33,10 @@ class MemoryRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Long-term memory distinct from LangGraph checkpoint state: knowledge
     reused across threads/sessions rather than within one conversation.
 
-    Embeddings for semantic retrieval are added in a later phase once the
-    embedding model/dimension is chosen — this table starts relational-only
-    so memory policy (ownership, provenance, supersession) is solid first.
+    Recall authorization is deliberately separate from similarity ranking:
+    callers always filter by tenant_id/user_id/status in SQL first (see
+    app/memory/recall.py), then rank what's left by `embedding` distance —
+    a memory never becomes visible just because it's a close vector match.
     """
 
     __tablename__ = "memory_records"
@@ -65,4 +68,7 @@ class MemoryRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIMENSION), nullable=True
     )

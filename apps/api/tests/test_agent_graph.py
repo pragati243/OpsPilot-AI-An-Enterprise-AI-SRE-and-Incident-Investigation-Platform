@@ -11,7 +11,9 @@ from app.agents.schemas import (
     PlannedStep,
     RecommendedAction,
 )
+from app.memory.schemas import ExtractedMemories, MemoryCandidate
 from app.models.incident import IncidentSeverity, IncidentStatus
+from app.models.memory import MemoryRecord, MemoryStatus
 from app.models.remediation import RemediationProposal, RemediationStatus
 from app.models.service import ServiceStatus
 from app.repositories.incident_repository import IncidentRepository
@@ -335,3 +337,141 @@ async def test_tool_error_is_captured_as_evidence_not_a_crash(tool_ctx: ToolCont
 
     report = await run_investigation(tool_ctx, incident.id, llm)
     assert report.outcome == "unresolved"
+
+
+def _llm_for_monday_friday(hypothesis: str) -> FakeAgentLLM:
+    return FakeAgentLLM(
+        tool_call_script=[[]],
+        structured_responses={
+            InvestigationPlan: [InvestigationPlan(hypothesis=hypothesis, steps=[])],
+            Assessment: [
+                Assessment(leading_hypothesis=hypothesis, confidence=0.85, ready_to_report=True)
+            ],
+            InvestigationReport: [
+                InvestigationReport(
+                    diagnosis="Connection pool exhausted under peak load.",
+                    evidence_summary="Health degraded, elevated error rate.",
+                    resolution=None,
+                    citations=[],
+                    confidence=0.85,
+                    outcome="resolved",
+                    recommended_actions=[],
+                )
+            ],
+            ExtractedMemories: [
+                ExtractedMemories(
+                    candidates=[
+                        MemoryCandidate(
+                            memory_type="semantic",
+                            content="checkout-service uses a Postgres connection pool sized at 10.",
+                            confidence=0.9,
+                        )
+                    ]
+                )
+            ],
+        },
+    )
+
+
+async def test_monday_friday_scenario_recalls_and_supersedes_memory(
+    tool_ctx: ToolContext,
+) -> None:
+    """The spec's worked example: Monday's resolved incident becomes a
+    memory; Friday's similar incident recalls it during planning (verified
+    separately in test_plan_prompt_includes_recalled_memory below) and,
+    once resolved the same way, supersedes rather than duplicates it.
+    """
+    await _seed_service(tool_ctx)
+    monday_incident = await _seed_incident(tool_ctx)
+
+    await run_investigation(tool_ctx, monday_incident.id, _llm_for_monday_friday("Monday"))
+
+    active_after_monday = (
+        await tool_ctx.db.execute(
+            select(MemoryRecord).where(
+                MemoryRecord.tenant_id == tool_ctx.tenant_id,
+                MemoryRecord.status == MemoryStatus.ACTIVE,
+            )
+        )
+    ).scalars().all()
+    assert len(active_after_monday) == 1
+
+    friday_incident = await IncidentRepository(tool_ctx.db).create(
+        tenant_id=tool_ctx.tenant_id,
+        title="Checkout error rate elevated again",
+        service="checkout-service",
+        environment="production",
+        severity=IncidentSeverity.SEV2,
+        status=IncidentStatus.INVESTIGATING,
+        created_by=tool_ctx.user.id,
+    )
+    await run_investigation(tool_ctx, friday_incident.id, _llm_for_monday_friday("Friday"))
+
+    all_memories = (
+        await tool_ctx.db.execute(
+            select(MemoryRecord).where(MemoryRecord.tenant_id == tool_ctx.tenant_id)
+        )
+    ).scalars().all()
+    active = [m for m in all_memories if m.status == MemoryStatus.ACTIVE]
+    superseded = [m for m in all_memories if m.status == MemoryStatus.SUPERSEDED]
+    assert len(active) == 1
+    assert len(superseded) == 1
+    assert superseded[0].superseded_by == active[0].id
+
+
+async def test_plan_prompt_includes_recalled_memory_with_verify_instruction(
+    tool_ctx: ToolContext,
+) -> None:
+    """Confirms recall actually reaches the plan node's prompt (not just
+    that storage/supersession works) and that it's framed as something to
+    verify, not assume.
+    """
+    await _seed_service(tool_ctx)
+    first_incident = await _seed_incident(tool_ctx)
+    await run_investigation(tool_ctx, first_incident.id, _llm_for_monday_friday("first"))
+
+    class RecordingFakeLLM(FakeAgentLLM):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.plan_prompts: list[str] = []
+
+        async def call_structured(self, messages, schema):
+            if schema is InvestigationPlan:
+                self.plan_prompts.append(str(messages[-1].content))
+            return await super().call_structured(messages, schema)
+
+    second_incident = await IncidentRepository(tool_ctx.db).create(
+        tenant_id=tool_ctx.tenant_id,
+        title="Checkout error rate elevated again",
+        service="checkout-service",
+        environment="production",
+        severity=IncidentSeverity.SEV2,
+        status=IncidentStatus.INVESTIGATING,
+        created_by=tool_ctx.user.id,
+    )
+    llm = RecordingFakeLLM(
+        tool_call_script=[[]],
+        structured_responses={
+            InvestigationPlan: [InvestigationPlan(hypothesis="n/a", steps=[])],
+            Assessment: [
+                Assessment(leading_hypothesis="n/a", confidence=0.5, ready_to_report=True)
+            ],
+            InvestigationReport: [
+                InvestigationReport(
+                    diagnosis="n/a",
+                    evidence_summary="n/a",
+                    resolution=None,
+                    citations=[],
+                    confidence=0.5,
+                    outcome="unresolved",
+                    recommended_actions=[],
+                )
+            ],
+        },
+    )
+    await run_investigation(tool_ctx, second_incident.id, llm)
+
+    assert len(llm.plan_prompts) == 1
+    prompt = llm.plan_prompts[0]
+    assert "connection pool" in prompt.lower()
+    assert "verify" in prompt.lower()

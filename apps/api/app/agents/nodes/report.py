@@ -6,7 +6,10 @@ from app.agents.schemas import InvestigationReport
 from app.agents.state import InvestigationState
 from app.core.logging import get_logger
 from app.guardrails.action_allowlist import ActionNotAllowedError
+from app.memory.extraction import extract_and_store_memories
 from app.models.episode import EpisodeOutcome
+from app.models.memory import MemoryType
+from app.repositories.memory_repository import MemoryRepository
 from app.tools.context import ToolContext
 from app.tools.remediation import propose_remediation
 from app.tools.reporting import create_incident_report
@@ -38,10 +41,21 @@ def build_report_node(ctx: ToolContext, llm: AgentLLM):
             if assessment
             else "(no assessment was completed — bounds were likely exhausted early)"
         )
+
+        profile_memories = await MemoryRepository(ctx.db).list_active(
+            tenant_id=ctx.tenant_id, user_id=ctx.user.id, memory_type=MemoryType.PROFILE
+        )
+        profile_text = (
+            "\n".join(f"- {m.content}" for m in profile_memories)
+            if profile_memories
+            else "(none stated)"
+        )
+
         prompt = (
             f"Incident: {state['incident_title']} on {state['service']} "
             f"({state['environment']})\n\n"
-            f"Evidence:\n{evidence_text}\n\nAssessment:\n{assessment_text}"
+            f"Evidence:\n{evidence_text}\n\nAssessment:\n{assessment_text}\n\n"
+            f"Investigating engineer's stated preferences:\n{profile_text}"
         )
         messages = [SystemMessage(content=REPORT_SYSTEM_PROMPT), HumanMessage(content=prompt)]
         investigation_report = await llm.call_structured(messages, InvestigationReport)
@@ -50,7 +64,7 @@ def build_report_node(ctx: ToolContext, llm: AgentLLM):
         # structured report, but it is this code — not the model — that
         # decides create_incident_report and propose_remediation actually
         # run, and propose_remediation still only ever lands pending approval.
-        await create_incident_report(
+        report_result = await create_incident_report(
             ctx,
             CreateIncidentReportInput(
                 incident_id=state["incident_id"],
@@ -80,6 +94,25 @@ def build_report_node(ctx: ToolContext, llm: AgentLLM):
                     action_type=action.action_type,
                     incident_id=str(state["incident_id"]),
                 )
+
+        try:
+            await extract_and_store_memories(
+                ctx.db,
+                tenant_id=ctx.tenant_id,
+                source_episode_id=report_result.episode_id,
+                llm=llm,
+                incident_title=state["incident_title"],
+                service=state["service"],
+                diagnosis=investigation_report.diagnosis,
+                evidence_summary=investigation_report.evidence_summary,
+            )
+        except Exception:
+            # Learning from this investigation is a bonus, not a
+            # requirement — a broken extraction call must never fail an
+            # otherwise-successful investigation that already has a report.
+            logger.warning(
+                "memory_extraction_failed", incident_id=str(state["incident_id"]), exc_info=True
+            )
 
         return {"report": investigation_report}
 

@@ -36,7 +36,7 @@ def build_graph(ctx: ToolContext, llm: AgentLLM) -> CompiledStateGraph:
 
     graph = StateGraph(InvestigationState)
     graph.add_node("intake", build_intake_node(ctx))
-    graph.add_node("plan", build_plan_node(llm))
+    graph.add_node("plan", build_plan_node(ctx, llm))
     graph.add_node("agent", build_agent_node(llm, tools))
     graph.add_node("execute_tools", build_execute_tools_node(tools))
     graph.add_node("assess", build_assess_node(llm))
