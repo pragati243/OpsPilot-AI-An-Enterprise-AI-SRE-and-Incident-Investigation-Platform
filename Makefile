@@ -1,4 +1,4 @@
-.PHONY: up down logs sync dev migrate revision test lint typecheck
+.PHONY: up down logs sync dev migrate revision seed-demo test lint typecheck
 
 up: ## Start Postgres + Redis for local dev
 	docker compose up -d postgres redis
@@ -20,6 +20,9 @@ migrate: ## Apply Alembic migrations
 
 revision: ## Autogenerate a new Alembic migration; usage: make revision m="add x"
 	cd apps/api && uv run --project .. alembic revision --autogenerate -m "$(m)"
+
+seed-demo: ## Seed one demo tenant with services, runbooks, and incidents
+	uv run python infra/scripts/seed_demo_data.py
 
 test: ## Run the backend test suite against the ephemeral test Postgres
 	docker compose --profile test up -d postgres-test redis

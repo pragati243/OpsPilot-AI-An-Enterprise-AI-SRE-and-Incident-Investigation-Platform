@@ -20,8 +20,8 @@ This repository is built strictly phase-by-phase against that spec.
 |---|---|---|
 | 0 | Repo scaffold, git, architecture doc | ✅ Done |
 | 1 | FastAPI backend foundation, DB, auth | ✅ Done |
-| 2 | Simulated prod environment + tool layer | ⏳ Next |
-| 3 | LangGraph agent workflow (Groq) | Not started |
+| 2 | Simulated prod environment + tool layer | ✅ Done |
+| 3 | LangGraph agent workflow (Groq) | ⏳ Next |
 | 4 | RAG / retrieval | Not started |
 | 5 | Memory system | Not started |
 | 6 | Langfuse observability | Not started |
@@ -35,8 +35,8 @@ This repository is built strictly phase-by-phase against that spec.
 
 ```
 apps/api/        FastAPI backend: core, db, models, schemas, repositories,
-                  services, api/v1, (agents/memory/retrieval/tools land in
-                  later phases)
+                  services, api/v1, tools (+ simulator), guardrails
+                  (agents/memory/retrieval land in later phases)
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
 apps/web/        React + TypeScript dashboard
 packages/        Shared schemas used across apps
@@ -55,6 +55,7 @@ uv sync --all-groups          # install Python deps into .venv
 make up                       # Postgres (+pgvector) and Redis via docker-compose
 make migrate                  # apply Alembic migrations
 make dev                      # run the API with autoreload on :8000
+make seed-demo                # seed one demo tenant with services/runbooks/incidents
 ```
 
 Run the test suite (spins up an ephemeral, tmpfs-backed test Postgres):
@@ -71,5 +72,21 @@ make test
 
 Other useful targets: `make lint` (ruff), `make typecheck` (mypy), `make revision m="..."`
 (new Alembic migration). See the [`Makefile`](Makefile) for the full list.
+
+### Simulated environment and tools
+
+`make seed-demo` creates a `demo-corp` tenant (login `admin@demo-corp.io` /
+`demo-password-change-me`) with six services — some healthy, some actively
+degraded/down against a deterministic scenario catalog
+(`apps/api/app/tools/simulator/scenarios.py`) — plus runbooks and a past
+resolved incident. The seven tool contracts from the spec
+(`get_service_health`, `query_logs`, `get_service_metrics`,
+`search_runbooks`, `search_past_incidents`, `create_incident_report`,
+`propose_remediation`) are implemented in `apps/api/app/tools/` as plain,
+directly-callable async functions over that data — no agent wires them up
+yet (Phase 3), but they're fully tested and runnable today. Every call is
+policy-checked and audit-logged via `apps/api/app/guardrails/tool_policy.py`;
+`propose_remediation` additionally runs through an action allowlist and
+always lands as `pending_approval` — it can never execute anything itself.
 
 Further setup instructions will be filled in as each phase lands.

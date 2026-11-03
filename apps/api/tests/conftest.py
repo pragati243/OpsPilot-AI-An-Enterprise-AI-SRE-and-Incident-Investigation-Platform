@@ -14,14 +14,20 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6399/0")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long")
 os.environ.setdefault("APP_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long-too")
 
+import uuid
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import engine
 from app.main import app
+from app.models.tenant import Tenant
+from app.models.user import User, UserRole
+from app.tools.context import ToolContext
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
@@ -69,3 +75,39 @@ async def client(db_session: AsyncSession):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+async def create_tenant(db_session: AsyncSession, *, slug: str | None = None) -> Tenant:
+    """Helper (not a fixture) so tool/guardrail tests can create more than
+    one tenant per test, e.g. for cross-tenant isolation checks.
+    """
+    slug = slug or f"tenant-{uuid.uuid4().hex[:8]}"
+    tenant = Tenant(name=slug, slug=slug)
+    db_session.add(tenant)
+    await db_session.flush()
+    return tenant
+
+
+async def create_user(
+    db_session: AsyncSession, tenant: Tenant, *, role: UserRole = UserRole.SRE
+) -> User:
+    user = User(
+        tenant_id=tenant.id,
+        email=f"user-{uuid.uuid4().hex[:8]}@example.io",
+        hashed_password=hash_password("not-used-in-tool-tests"),
+        full_name="Test User",
+        role=role,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user
+
+
+@pytest_asyncio.fixture
+async def tool_ctx(db_session: AsyncSession) -> ToolContext:
+    """A fresh tenant + SRE user wrapped in a ToolContext, for tests that
+    call tool functions directly rather than through the HTTP API.
+    """
+    tenant = await create_tenant(db_session)
+    user = await create_user(db_session, tenant)
+    return ToolContext(tenant_id=tenant.id, user=user, db=db_session)

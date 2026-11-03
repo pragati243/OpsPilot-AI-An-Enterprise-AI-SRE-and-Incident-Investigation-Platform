@@ -2,6 +2,8 @@ from app.models.document import Document, DocumentSourceType
 from app.models.episode import Episode, EpisodeOutcome
 from app.models.incident import Incident, IncidentSeverity, IncidentStatus
 from app.models.memory import MemoryProvenance, MemoryRecord, MemoryStatus, MemoryType
+from app.models.remediation import RemediationProposal, RemediationRiskLevel, RemediationStatus
+from app.models.service import Service, ServiceStatus
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 
@@ -20,4 +22,9 @@ __all__ = [
     "MemoryStatus",
     "Document",
     "DocumentSourceType",
+    "Service",
+    "ServiceStatus",
+    "RemediationProposal",
+    "RemediationRiskLevel",
+    "RemediationStatus",
 ]
