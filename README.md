@@ -22,8 +22,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 1 | FastAPI backend foundation, DB, auth | ✅ Done |
 | 2 | Simulated prod environment + tool layer | ✅ Done |
 | 3 | LangGraph agent workflow (Groq) | ✅ Done |
-| 4 | RAG / retrieval | ⏳ Next |
-| 5 | Memory system | Not started |
+| 4 | RAG / retrieval | ✅ Done |
+| 5 | Memory system | ⏳ Next |
 | 6 | Langfuse observability | Not started |
 | 7 | API completion (SSE, rate limiting) | Not started |
 | 8 | React + TypeScript dashboard | Not started |
@@ -35,8 +35,8 @@ This repository is built strictly phase-by-phase against that spec.
 
 ```
 apps/api/        FastAPI backend: core, db, models, schemas, repositories,
-                  api/v1, tools (+ simulator), guardrails, agents
-                  (memory/retrieval land in later phases)
+                  api/v1, tools (+ simulator), guardrails, agents, retrieval
+                  (memory lands in a later phase)
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
 apps/web/        React + TypeScript dashboard
 packages/        Shared schemas used across apps
@@ -120,5 +120,25 @@ curl -X POST http://localhost:8010/api/v1/incidents/<incident_id>/investigate \
 This requires a real `GROQ_API_KEY` in `.env` (Groq's OpenAI-compatible
 endpoint, configured in `app/agents/llm_client.py::build_groq_llm`) — the
 test suite doesn't need one, but hitting the live endpoint does.
+
+### Retrieval (RAG)
+
+`search_runbooks` now does real hybrid search instead of Phase 2's
+ILIKE-only match: dense retrieval (`pgvector` cosine distance over
+384-dim embeddings from `BAAI/bge-small-en-v1.5` via `fastembed` — ONNX,
+CPU, no `torch`, no API key) fused with Postgres full-text search
+(`tsvector` + GIN index over title+content) using Reciprocal Rank Fusion.
+ACL filtering (`access_scope`) is pushed into both legs of the SQL itself
+(`apps/api/app/retrieval/hybrid_search.py`), not applied in Python after
+the fact. A cosine-distance cutoff drops candidates that are "the best of
+a bad lot" rather than an actual match — verified with real distances: an
+on-topic query lands around 0.28-0.33, an off-topic one around 0.60.
+
+Documents only ever enter the system through
+`apps/api/app/retrieval/ingestion.py::ingest_document`, which computes the
+embedding at write time — there's no path that creates a Document without
+one. See `apps/api/tests/test_tools_knowledge.py` for the test that proves
+the point: a query sharing zero literal words with a runbook still finds it
+(and a genuinely unrelated query correctly finds nothing).
 
 Further setup instructions will be filled in as each phase lands.

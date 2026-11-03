@@ -18,6 +18,7 @@ import uuid
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
@@ -35,8 +36,13 @@ async def _prepare_database():
     """Create the full schema once per test run and drop it afterwards.
     Keeps the test suite self-sufficient without requiring `alembic upgrade
     head` to have been run against the test database first.
+
+    The `vector` extension has to exist before create_all(), since
+    Document.embedding's column type depends on it — `CREATE EXTENSION` is
+    per-database, so the ephemeral test Postgres needs it too, not just dev.
     """
     async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with engine.begin() as conn:

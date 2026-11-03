@@ -1,12 +1,16 @@
 from app.guardrails.access_scope import allowed_scopes_for
 from app.guardrails.tool_policy import enforce_tool_policy
-from app.models.document import Document, DocumentSourceType
-from app.repositories.document_repository import DocumentRepository
+from app.models.document import DocumentSourceType
+from app.retrieval.hybrid_search import hybrid_search_documents
 from app.tools.context import ToolContext
 from app.tools.schemas import RunbookMatch, SearchRunbooksInput, SearchRunbooksResult
 
 
 def _snippet(content: str, query: str, *, radius: int = 80) -> str:
+    """Best-effort excerpt around a literal match. A purely semantic hit
+    (no literal keyword overlap) falls back to the start of the content —
+    there's no literal span to center on, and that's expected, not a bug.
+    """
     lowered = content.lower()
     idx = lowered.find(query.lower())
     if idx == -1:
@@ -18,36 +22,28 @@ def _snippet(content: str, query: str, *, radius: int = 80) -> str:
     return f"{prefix}{content[start:end].strip()}{suffix}"
 
 
-def _score(document: Document, query: str) -> float:
-    """Keyword occurrence count, title weighted higher than body. A stand-in
-    for real relevance scoring until the retrieval phase's hybrid search.
-    """
-    lowered_query = query.lower()
-    return float(
-        3 * document.title.lower().count(lowered_query)
-        + document.content.lower().count(lowered_query)
-    )
-
-
 @enforce_tool_policy("search_runbooks")
 async def search_runbooks(
     ctx: ToolContext, params: SearchRunbooksInput
 ) -> SearchRunbooksResult:
-    documents = await DocumentRepository(ctx.db).search(
+    matches = await hybrid_search_documents(
+        ctx.db,
         tenant_id=ctx.tenant_id,
-        query=params.query,
         source_type=DocumentSourceType.RUNBOOK,
+        query=params.query,
         allowed_scopes=allowed_scopes_for(ctx.user),
+        limit=params.limit,
     )
 
-    ranked = sorted(documents, key=lambda doc: _score(doc, params.query), reverse=True)
-    matches = [
-        RunbookMatch(
-            document_id=doc.id,
-            title=doc.title,
-            snippet=_snippet(doc.content, params.query),
-            score=_score(doc, params.query),
-        )
-        for doc in ranked[: params.limit]
-    ]
-    return SearchRunbooksResult(query=params.query, matches=matches)
+    return SearchRunbooksResult(
+        query=params.query,
+        matches=[
+            RunbookMatch(
+                document_id=match.id,
+                title=match.title,
+                snippet=_snippet(match.content, params.query),
+                score=match.score,
+            )
+            for match in matches
+        ],
+    )

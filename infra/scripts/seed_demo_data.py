@@ -26,6 +26,7 @@ from app.repositories.incident_repository import IncidentRepository  # noqa: E40
 from app.repositories.service_repository import ServiceRepository  # noqa: E402
 from app.repositories.tenant_repository import TenantRepository  # noqa: E402
 from app.repositories.user_repository import UserRepository  # noqa: E402
+from app.retrieval.ingestion import ingest_document  # noqa: E402
 
 DEMO_TENANT_SLUG = "demo-corp"
 DEMO_TENANT_NAME = "Demo Corp"
@@ -175,7 +176,8 @@ async def main() -> None:
             if any(doc.title == title for doc in existing):
                 print(f"runbook {title!r} already exists")
                 continue
-            await document_repo.create(
+            await ingest_document(
+                db,
                 tenant_id=tenant.id,
                 title=title,
                 source_type=DocumentSourceType.RUNBOOK,
@@ -183,7 +185,7 @@ async def main() -> None:
                 access_scope=access_scope,
                 created_by=admin.id,
             )
-            print(f"created runbook {title!r}")
+            print(f"created runbook {title!r} (embedded)")
 
         incident_repo = IncidentRepository(db)
         episode_repo = EpisodeRepository(db)

@@ -2,9 +2,9 @@ from app.models.document import DocumentSourceType
 from app.models.episode import EpisodeOutcome
 from app.models.incident import IncidentSeverity, IncidentStatus
 from app.models.user import UserRole
-from app.repositories.document_repository import DocumentRepository
 from app.repositories.episode_repository import EpisodeRepository
 from app.repositories.incident_repository import IncidentRepository
+from app.retrieval.ingestion import ingest_document
 from app.tools.context import ToolContext
 from app.tools.incidents import search_past_incidents
 from app.tools.runbooks import search_runbooks
@@ -12,8 +12,11 @@ from app.tools.schemas import SearchPastIncidentsInput, SearchRunbooksInput
 from tests.conftest import create_tenant, create_user
 
 
-async def test_search_runbooks_matches_public_document(tool_ctx: ToolContext) -> None:
-    await DocumentRepository(tool_ctx.db).create(
+async def test_search_runbooks_matches_public_document_and_cites_it(
+    tool_ctx: ToolContext,
+) -> None:
+    document = await ingest_document(
+        tool_ctx.db,
         tenant_id=tool_ctx.tenant_id,
         title="Diagnosing connection pool exhaustion",
         source_type=DocumentSourceType.RUNBOOK,
@@ -26,7 +29,67 @@ async def test_search_runbooks_matches_public_document(tool_ctx: ToolContext) ->
         tool_ctx, SearchRunbooksInput(query="connection pool")
     )
     assert len(result.matches) == 1
+    assert result.matches[0].document_id == document.id
     assert "connection pool" in result.matches[0].title.lower()
+
+
+async def test_search_runbooks_finds_semantic_match_without_keyword_overlap(
+    tool_ctx: ToolContext,
+) -> None:
+    """The actual point of hybrid search over Phase 2's keyword-only match:
+    a query sharing no literal words with the document still finds it
+    because the vector leg captures the underlying meaning.
+    """
+    await ingest_document(
+        tool_ctx.db,
+        tenant_id=tool_ctx.tenant_id,
+        title="Diagnosing database connection pool exhaustion",
+        source_type=DocumentSourceType.RUNBOOK,
+        content=(
+            "Symptoms: elevated p99 latency, error rate above 5%, logs showing "
+            "QueuePool limit ... overflow ... connection timed out."
+        ),
+        access_scope=[],
+        created_by=tool_ctx.user.id,
+    )
+    await ingest_document(
+        tool_ctx.db,
+        tenant_id=tool_ctx.tenant_id,
+        title="Baking a chocolate cake",
+        source_type=DocumentSourceType.RUNBOOK,
+        content="Preheat the oven to 180C. Mix flour, sugar, cocoa, and eggs.",
+        access_scope=[],
+        created_by=tool_ctx.user.id,
+    )
+
+    result = await search_runbooks(
+        tool_ctx,
+        SearchRunbooksInput(
+            query="database is running out of available connections under heavy traffic"
+        ),
+    )
+
+    assert len(result.matches) == 1
+    assert "connection pool" in result.matches[0].title.lower()
+
+
+async def test_search_runbooks_returns_nothing_for_unrelated_query(
+    tool_ctx: ToolContext,
+) -> None:
+    await ingest_document(
+        tool_ctx.db,
+        tenant_id=tool_ctx.tenant_id,
+        title="Diagnosing database connection pool exhaustion",
+        source_type=DocumentSourceType.RUNBOOK,
+        content="Connection pool exhausted under peak load, logs show QueuePool errors.",
+        access_scope=[],
+        created_by=tool_ctx.user.id,
+    )
+
+    result = await search_runbooks(
+        tool_ctx, SearchRunbooksInput(query="how do I bake a chocolate cake")
+    )
+    assert result.matches == []
 
 
 async def test_search_runbooks_hides_restricted_document_from_viewer(
@@ -36,7 +99,8 @@ async def test_search_runbooks_hides_restricted_document_from_viewer(
     viewer = await create_user(db_session, tenant, role=UserRole.VIEWER)
     admin = await create_user(db_session, tenant, role=UserRole.ADMIN)
 
-    await DocumentRepository(db_session).create(
+    await ingest_document(
+        db_session,
         tenant_id=tenant.id,
         title="Restricted failover procedure",
         source_type=DocumentSourceType.RUNBOOK,
@@ -62,7 +126,8 @@ async def test_search_runbooks_hides_restricted_document_from_viewer(
 async def test_search_runbooks_does_not_leak_across_tenants(
     tool_ctx: ToolContext, db_session
 ) -> None:
-    await DocumentRepository(tool_ctx.db).create(
+    await ingest_document(
+        tool_ctx.db,
         tenant_id=tool_ctx.tenant_id,
         title="Tenant A runbook about memory leaks",
         source_type=DocumentSourceType.RUNBOOK,
