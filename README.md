@@ -24,8 +24,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 3 | LangGraph agent workflow (Groq) | ✅ Done |
 | 4 | RAG / retrieval | ✅ Done |
 | 5 | Memory system | ✅ Done |
-| 6 | Langfuse observability | ⏳ Next |
-| 7 | API completion (SSE, rate limiting) | Not started |
+| 6 | Langfuse observability | ✅ Done |
+| 7 | API completion (SSE, rate limiting) | ⏳ Next |
 | 8 | React + TypeScript dashboard | Not started |
 | 9 | MCP server | Not started |
 | 10 | Evaluation suite + CI quality gate | Not started |
@@ -36,7 +36,7 @@ This repository is built strictly phase-by-phase against that spec.
 ```
 apps/api/        FastAPI backend: core, db, models, schemas, repositories,
                   api/v1, tools (+ simulator), guardrails, agents, retrieval,
-                  memory
+                  memory, observability
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
 apps/web/        React + TypeScript dashboard
 packages/        Shared schemas used across apps
@@ -183,5 +183,45 @@ giving the "engineer prefers concise reports with evidence first" example
 from the spec a real, working path. Users can inspect
 (`GET /api/v1/memories`), correct (`PATCH .../{id}`), and delete
 (`DELETE .../{id}`) their own memories.
+
+### Observability (Langfuse)
+
+`apps/api/app/observability/` wires the whole agent run into Langfuse
+(v5, OTel-based SDK — the API changed significantly from older tutorials,
+so this was built directly against the installed SDK, not copied from
+docs). One root span per investigation (`investigate_incident`, created in
+`graph.py::run_investigation`), with `propagate_attributes` carrying
+`user_id`/`session_id`/`tenant_id`/workflow version to every child
+observation. Underneath it: a `node:*` span per LangGraph node, a
+`generation` span per LLM call (model name + token usage, via a tiny
+`include_raw=True` trick to pull `usage_metadata` back out of
+`with_structured_output`), a `tool:*` span for *every* tool call — added
+once in `enforce_tool_policy` so all 7 tools get it for free regardless of
+whether the LLM invoked it or app code did — and a `retriever` span for
+hybrid search carrying ranked document ids/titles/scores, never raw
+content.
+
+Verified against a real Langfuse Cloud project (not just unit tests): ran
+a full investigation and pulled the trace back via the API —
+`investigate_incident → node:intake → node:plan → (node:agent ↔
+node:execute_tools, with tool:get_service_health, tool:search_runbooks,
+and a nested hybrid_search_documents retriever span) → node:assess →
+node:report → tool:create_incident_report, tool:propose_remediation` — 15
+observations, correctly typed and nested, with `user_id`/`session_id`
+confirmed propagated onto the root span.
+
+Redaction is defense in depth, not a single check: `app/core/redaction.py`
+holds the shared secret-pattern regexes (reused by the memory policy
+gate), `app/observability/masking.py` is the global `mask` callback
+Langfuse runs on every captured field (redacts secrets, blanks
+sensitive-looking keys like `Authorization` outright, truncates long
+strings), and `app/observability/serialization.py` additionally bounds
+message previews to 500 chars *before* that global pass even runs — so a
+massive tool output is never fully captured in the first place, not just
+redacted after the fact. Tests never hit the real Langfuse API: `.env`'s
+real keys are explicitly blanked in `tests/conftest.py` (environment
+variables, not `os.environ.pop`, since pydantic-settings reads `.env`
+directly and would otherwise win), and the suite instead asserts that
+every span call is a silent no-op without them.
 
 Further setup instructions will be filled in as each phase lands.

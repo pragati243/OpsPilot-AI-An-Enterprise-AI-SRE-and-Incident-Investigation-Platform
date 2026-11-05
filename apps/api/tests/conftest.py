@@ -13,6 +13,14 @@ os.environ.setdefault("ENV", "test")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6399/0")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long")
 os.environ.setdefault("APP_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long-too")
+# Tests must never ship real spans to Langfuse Cloud. pydantic-settings
+# reads .env directly (env_file=".env"), so popping these from os.environ
+# would NOT override a real .env value — pydantic-settings' precedence is
+# process env > .env file, so setting them to "" here is what actually
+# wins and disables the client (see get_langfuse_client's `configured`
+# check, which treats an empty string as "not configured").
+os.environ["LANGFUSE_PUBLIC_KEY"] = ""
+os.environ["LANGFUSE_SECRET_KEY"] = ""
 
 import uuid
 

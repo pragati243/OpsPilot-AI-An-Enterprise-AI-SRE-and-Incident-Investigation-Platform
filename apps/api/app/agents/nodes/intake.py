@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
+from langfuse import observe
+
 from app.agents.state import InvestigationState
+from app.observability.client import get_langfuse_client
 from app.repositories.incident_repository import IncidentRepository
 from app.tools.context import ToolContext
 
@@ -16,6 +19,7 @@ DEFAULT_DEADLINE_SECONDS = 90
 # makes `graph.add_node(...)` fail to resolve any overload — confirmed by
 # isolated repro against this langgraph version, not a runtime issue.
 def build_intake_node(ctx: ToolContext):
+    @observe(name="node:intake", as_type="span", capture_input=False, capture_output=False)
     async def intake(state: InvestigationState) -> dict:
         """Validate the incident exists and belongs to this tenant before any
         LLM call happens — an unauthorized or bogus incident_id costs nothing
@@ -25,11 +29,19 @@ def build_intake_node(ctx: ToolContext):
             tenant_id=ctx.tenant_id, incident_id=state["incident_id"]
         )
         if incident is None:
+            get_langfuse_client().update_current_span(
+                input={"incident_id": str(state["incident_id"])},
+                output={"authorized": False},
+            )
             return {
                 "authorized": False,
                 "error": "incident not found, or not accessible to this tenant",
             }
 
+        get_langfuse_client().update_current_span(
+            input={"incident_id": str(state["incident_id"])},
+            output={"authorized": True, "service": incident.service},
+        )
         return {
             "authorized": True,
             "incident_title": incident.title,

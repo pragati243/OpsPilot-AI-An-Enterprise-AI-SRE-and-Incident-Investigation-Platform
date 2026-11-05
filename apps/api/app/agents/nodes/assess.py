@@ -1,14 +1,17 @@
 from langchain_core.messages import HumanMessage, SystemMessage
+from langfuse import observe
 
 from app.agents.llm_client import AgentLLM
 from app.agents.prompts import ASSESS_SYSTEM_PROMPT
 from app.agents.schemas import Assessment
 from app.agents.state import InvestigationState
+from app.observability.client import get_langfuse_client
 
 
 # See the comment in nodes/intake.py about why these builders don't carry an
 # explicit Callable[...] return annotation.
 def build_assess_node(llm: AgentLLM):
+    @observe(name="node:assess", as_type="span", capture_input=False, capture_output=False)
     async def assess(state: InvestigationState) -> dict:
         evidence = state.get("evidence") or []
         evidence_text = (
@@ -25,6 +28,14 @@ def build_assess_node(llm: AgentLLM):
         )
         messages = [SystemMessage(content=ASSESS_SYSTEM_PROMPT), HumanMessage(content=prompt)]
         assessment = await llm.call_structured(messages, Assessment)
+
+        get_langfuse_client().update_current_span(
+            input={"evidence_count": len(evidence)},
+            output={
+                "confidence": assessment.confidence,
+                "ready_to_report": assessment.ready_to_report,
+            },
+        )
         return {"assessment": assessment}
 
     return assess

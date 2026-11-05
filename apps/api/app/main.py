@@ -11,6 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.observability.client import get_langfuse_client
 
 configure_logging()
 logger = get_logger(__name__)
@@ -36,6 +37,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("app_startup", env=get_settings().env)
     yield
+    # Langfuse batches spans in the background; without an explicit flush
+    # at shutdown, whatever hasn't been sent yet is lost on process exit.
+    get_langfuse_client().flush()
     logger.info("app_shutdown")
 
 

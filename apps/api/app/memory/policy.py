@@ -1,6 +1,8 @@
 import re
 import uuid
 
+from app.core.redaction import contains_secret
+
 MAX_CONTENT_LENGTH = 1000
 
 # Cosine similarity above this is treated as "restating the same fact," not
@@ -8,17 +10,6 @@ MAX_CONTENT_LENGTH = 1000
 # tuned against an eval dataset; picked deliberately high so two merely
 # *related* facts about the same service don't collide.
 SUPERSESSION_SIMILARITY_THRESHOLD = 0.92
-
-# Deterministic backstop against secrets ending up in long-term memory —
-# applies regardless of what the extraction LLM was told not to do, so a
-# successful prompt injection in that call still can't smuggle a credential
-# into storage.
-_SECRET_PATTERNS = [
-    re.compile(r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]\s*\S+"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id shape
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),  # generic "sk-..." API key shape
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-]
 
 # Deterministic backstop against prompt-injection-flavored text being
 # stored as if it were a verified fact — a second line of defense behind
@@ -49,11 +40,10 @@ def validate_content(content: str) -> None:
             f"memory content exceeds {MAX_CONTENT_LENGTH} characters"
         )
 
-    for pattern in _SECRET_PATTERNS:
-        if pattern.search(content):
-            raise MemoryPolicyViolation(
-                "memory content looks like it contains a secret or credential"
-            )
+    if contains_secret(content):
+        raise MemoryPolicyViolation(
+            "memory content looks like it contains a secret or credential"
+        )
 
     for pattern in _INJECTION_PATTERNS:
         if pattern.search(content):

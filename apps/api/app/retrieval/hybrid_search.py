@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import DocumentSourceType
+from app.observability.client import get_langfuse_client
 from app.retrieval.embeddings import embed_query
 
 # Reciprocal Rank Fusion constant — the standard default (e.g. Elasticsearch
@@ -90,22 +91,37 @@ async def hybrid_search_documents(
     """
     query_vector = await embed_query(query)
 
-    result = await db.execute(
-        _HYBRID_SEARCH_SQL,
-        {
-            "query_embedding": _vector_literal(query_vector),
-            "raw_query": query,
-            "tenant_id": tenant_id,
-            # SQLAlchemy's Enum() column stores the Python member *name*
-            # (e.g. "RUNBOOK"), not `.value` ("runbook") — this raw SQL has
-            # to match that directly since there's no ORM type coercion
-            # on this path.
-            "source_type": source_type.name,
-            "allowed_scopes": list(allowed_scopes),
-            "candidate_limit": _CANDIDATE_LIMIT,
-            "max_vector_distance": _MAX_VECTOR_DISTANCE,
-            "rrf_k": _RRF_K,
-            "result_limit": limit,
-        },
-    )
-    return [HybridMatch(**row._mapping) for row in result]
+    with get_langfuse_client().start_as_current_observation(
+        name="hybrid_search_documents",
+        as_type="retriever",
+        input={"query": query, "source_type": source_type.value},
+    ) as retriever_span:
+        result = await db.execute(
+            _HYBRID_SEARCH_SQL,
+            {
+                "query_embedding": _vector_literal(query_vector),
+                "raw_query": query,
+                "tenant_id": tenant_id,
+                # SQLAlchemy's Enum() column stores the Python member *name*
+                # (e.g. "RUNBOOK"), not `.value` ("runbook") — this raw SQL
+                # has to match that directly since there's no ORM type
+                # coercion on this path.
+                "source_type": source_type.name,
+                "allowed_scopes": list(allowed_scopes),
+                "candidate_limit": _CANDIDATE_LIMIT,
+                "max_vector_distance": _MAX_VECTOR_DISTANCE,
+                "rrf_k": _RRF_K,
+                "result_limit": limit,
+            },
+        )
+        matches = [HybridMatch(**row._mapping) for row in result]
+        # Authorized document identifiers, ranks, and citations — not the
+        # full retrieved content, matching the spec's observability scope.
+        retriever_span.update(
+            output=[
+                {"rank": rank, "document_id": str(match.id), "title": match.title,
+                 "score": match.score}
+                for rank, match in enumerate(matches, start=1)
+            ]
+        )
+    return matches

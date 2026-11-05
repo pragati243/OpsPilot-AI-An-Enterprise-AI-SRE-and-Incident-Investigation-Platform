@@ -2,16 +2,19 @@ from datetime import UTC, datetime
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
+from langfuse import observe
 
 from app.agents.llm_client import AgentLLM
 from app.agents.prompts import GATHER_SYSTEM_PROMPT
 from app.agents.schemas import EvidenceItem
 from app.agents.state import InvestigationState
+from app.observability.client import get_langfuse_client
 
 
 # See the comment in nodes/intake.py about why these builders don't carry an
 # explicit Callable[...] return annotation.
 def build_agent_node(llm: AgentLLM, tools: dict[str, StructuredTool]):
+    @observe(name="node:agent", as_type="span", capture_input=False, capture_output=False)
     async def agent_node(state: InvestigationState) -> dict:
         existing = state.get("messages") or []
         new_messages: list[AnyMessage] = []
@@ -36,19 +39,27 @@ def build_agent_node(llm: AgentLLM, tools: dict[str, StructuredTool]):
         if state.get("tool_call_count", 0) >= state["max_tool_calls"]:
             # Budget already exhausted by a prior iteration — don't spend
             # another model call, just fall through to assess.
+            get_langfuse_client().update_current_span(output={"skipped": "budget_exhausted"})
             return {"messages": new_messages}
 
         if datetime.now(UTC) >= state["deadline"]:
+            get_langfuse_client().update_current_span(output={"skipped": "deadline_exceeded"})
             return {"messages": new_messages}
 
         response = await llm.call_with_tools([*existing, *new_messages], list(tools.values()))
         new_messages.append(response)
+        get_langfuse_client().update_current_span(
+            output={"requested_tool_calls": [c["name"] for c in (response.tool_calls or [])]}
+        )
         return {"messages": new_messages}
 
     return agent_node
 
 
 def build_execute_tools_node(tools: dict[str, StructuredTool]):
+    @observe(
+        name="node:execute_tools", as_type="span", capture_input=False, capture_output=False
+    )
     async def execute_tools(state: InvestigationState) -> dict:
         messages = state.get("messages") or []
         last = messages[-1] if messages else None
@@ -89,6 +100,13 @@ def build_execute_tools_node(tools: dict[str, StructuredTool]):
                 )
             )
 
+        get_langfuse_client().update_current_span(
+            input={"requested": [c["name"] for c in tool_calls]},
+            output={
+                "executed": [c["name"] for c in calls_to_run],
+                "over_budget": [c["name"] for c in calls_over_budget],
+            },
+        )
         return {
             "messages": new_messages,
             "evidence": new_evidence,

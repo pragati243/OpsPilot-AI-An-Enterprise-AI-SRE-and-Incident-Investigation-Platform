@@ -13,6 +13,7 @@ from app.agents.nodes.report import build_report_node
 from app.agents.schemas import InvestigationReport
 from app.agents.state import InvestigationState
 from app.agents.tool_adapter import build_tools_for_context
+from app.observability.tracing import investigation_trace
 from app.tools.context import ToolContext
 
 # Comfortably above the worst case (intake + plan + up to ~8 agent/tool
@@ -65,18 +66,26 @@ async def run_investigation(
         "configurable": {"thread_id": str(incident_id)},
         "recursion_limit": _RECURSION_LIMIT,
     }
-    # mypy can't resolve this against langgraph 1.x's Pregel.ainvoke overload
-    # set (confirmed this exact call shape runs correctly at runtime — see
-    # the comment in nodes/intake.py for the same library's typing friction).
-    final_state = await compiled.ainvoke(  # type: ignore[call-overload]
-        {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "incident_id": incident_id},
-        config=config,
-    )
+    with investigation_trace(
+        tenant_id=ctx.tenant_id, user_id=ctx.user.id, incident_id=incident_id
+    ) as root_span:
+        # mypy can't resolve this against langgraph 1.x's Pregel.ainvoke
+        # overload set (confirmed this exact call shape runs correctly at
+        # runtime — see the comment in nodes/intake.py for the same
+        # library's typing friction).
+        final_state = await compiled.ainvoke(  # type: ignore[call-overload]
+            {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "incident_id": incident_id},
+            config=config,
+        )
 
-    if final_state.get("error"):
-        raise InvestigationIncomplete(final_state["error"])
+        if final_state.get("error"):
+            root_span.update(level="ERROR", status_message=final_state["error"])
+            raise InvestigationIncomplete(final_state["error"])
 
-    report = final_state.get("report")
-    if report is None:
-        raise InvestigationIncomplete("investigation ended without producing a report")
-    return report
+        report = final_state.get("report")
+        if report is None:
+            root_span.update(level="ERROR", status_message="no report produced")
+            raise InvestigationIncomplete("investigation ended without producing a report")
+
+        root_span.update(output=report.model_dump(mode="json"))
+        return report

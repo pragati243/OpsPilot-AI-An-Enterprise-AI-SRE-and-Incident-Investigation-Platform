@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import ParamSpec, TypeVar
 
+from pydantic import BaseModel
+
 from app.core.logging import get_logger
+from app.observability.client import get_langfuse_client
 from app.tools.context import ToolContext
 
 logger = get_logger(__name__)
@@ -45,9 +48,11 @@ def enforce_tool_policy(
     tool_name: str,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Wrap a tool function so every call is checked against the tool
-    registry and logged with outcome + latency — the audit trail guardrails
-    need regardless of which caller (API route today, a LangGraph tool node
-    later) invokes the tool.
+    registry, traced in Langfuse, and logged with outcome + latency — the
+    audit trail guardrails need regardless of which caller (an API route,
+    the LLM via tool_adapter, or app code in the report node) invokes the
+    tool. One wrapper covers all 7 tools, so this is the single place that
+    creates a "tool" span rather than repeating it at every call site.
 
     This does not do RBAC on its own: `create_incident_report` and
     `propose_remediation` are reachable by any authenticated tenant member
@@ -65,27 +70,42 @@ def enforce_tool_policy(
         @functools.wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             ctx = _find_tool_context(args, kwargs)
+            params = _find_params(args, kwargs)
             started = time.monotonic()
-            try:
-                result = await func(*args, **kwargs)
-            except Exception as exc:
-                logger.warning(
-                    "tool_call_failed",
+
+            with get_langfuse_client().start_as_current_observation(
+                name=f"tool:{spec.name}",
+                as_type="tool",
+                input=params.model_dump(mode="json") if params is not None else None,
+                metadata={"access_mode": spec.access_mode.value},
+            ) as tool_span:
+                try:
+                    result = await func(*args, **kwargs)
+                except Exception as exc:
+                    tool_span.update(level="ERROR", status_message=str(exc))
+                    logger.warning(
+                        "tool_call_failed",
+                        tool=spec.name,
+                        access_mode=spec.access_mode.value,
+                        tenant_id=str(ctx.tenant_id) if ctx else None,
+                        duration_ms=round((time.monotonic() - started) * 1000, 2),
+                        error_type=type(exc).__name__,
+                    )
+                    raise
+
+                tool_span.update(
+                    output=result.model_dump(mode="json")
+                    if isinstance(result, BaseModel)
+                    else result
+                )
+                logger.info(
+                    "tool_call_succeeded",
                     tool=spec.name,
                     access_mode=spec.access_mode.value,
                     tenant_id=str(ctx.tenant_id) if ctx else None,
                     duration_ms=round((time.monotonic() - started) * 1000, 2),
-                    error_type=type(exc).__name__,
                 )
-                raise
-            logger.info(
-                "tool_call_succeeded",
-                tool=spec.name,
-                access_mode=spec.access_mode.value,
-                tenant_id=str(ctx.tenant_id) if ctx else None,
-                duration_ms=round((time.monotonic() - started) * 1000, 2),
-            )
-            return result
+                return result
 
         return wrapper
 
@@ -95,5 +115,12 @@ def enforce_tool_policy(
 def _find_tool_context(args: tuple, kwargs: dict) -> ToolContext | None:
     for value in (*args, *kwargs.values()):
         if isinstance(value, ToolContext):
+            return value
+    return None
+
+
+def _find_params(args: tuple, kwargs: dict) -> BaseModel | None:
+    for value in (*args, *kwargs.values()):
+        if isinstance(value, BaseModel):
             return value
     return None
