@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = Field(default="")
     langfuse_host: str = "https://cloud.langfuse.com"
 
-    cors_allow_origins: list[str] = ["http://localhost:5173"]
+    # Not 5173: another project on this dev machine already holds it, so
+    # apps/web/vite.config.ts pins the dashboard to 5180 instead.
+    cors_allow_origins: list[str] = ["http://localhost:5180"]
 
     @property
     def is_production(self) -> bool:

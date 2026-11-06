@@ -26,8 +26,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 5 | Memory system | ✅ Done |
 | 6 | Langfuse observability | ✅ Done |
 | 7 | API completion (SSE, rate limiting) | ✅ Done |
-| 8 | React + TypeScript dashboard | ⏳ Next |
-| 9 | MCP server | Not started |
+| 8 | React + TypeScript dashboard | ✅ Done |
+| 9 | MCP server | ⏳ Next |
 | 10 | Evaluation suite + CI quality gate | Not started |
 | 11 | Docker / CI/CD / deployment | Not started |
 
@@ -38,7 +38,7 @@ apps/api/        FastAPI backend: core, db, models, schemas, repositories,
                   api/v1, tools (+ simulator), guardrails, agents, retrieval,
                   memory, observability
 apps/mcp-server/ MCP server exposing diagnostic tools as resources
-apps/web/        React + TypeScript dashboard
+apps/web/        React + TypeScript dashboard (Vite)
 packages/        Shared schemas used across apps
 evals/           Golden dataset, evaluators, eval runner
 infra/           Docker and provisioning scripts
@@ -54,8 +54,17 @@ cp .env.example .env          # fill in real secrets; defaults work for local de
 uv sync --all-groups          # install Python deps into .venv
 make up                       # Postgres (+pgvector) and Redis via docker-compose
 make migrate                  # apply Alembic migrations
-make dev                      # run the API with autoreload on :8000
+make dev                      # run the API with autoreload on :8010
 make seed-demo                # seed one demo tenant with services/runbooks/incidents
+```
+
+Then the dashboard, in a second terminal:
+
+```bash
+cd apps/web
+cp .env.example .env          # points at the API; default matches make dev's :8010
+npm install
+npm run dev                   # http://localhost:5180
 ```
 
 Run the test suite (spins up an ephemeral, tmpfs-backed test Postgres):
@@ -65,10 +74,14 @@ make test
 ```
 
 > **Note for this dev machine specifically:** `docker-compose.yml` maps
-> Postgres/Redis to non-default host ports (5544/5545/6399) because this
-> machine already runs a native Postgres service on 5432, a native Memurai
-> (Redis-compatible) service on 6379, and a WSL relay on 5433. If you're on a
-> clean machine without those, feel free to remap to the standard ports.
+> Postgres/Redis to non-default host ports (5544/5545/6399), the API runs
+> on :8010 not :8000, and the dashboard runs on :5180 not Vite's default
+> :5173 — this machine already runs a native Postgres service on 5432, a
+> native Memurai (Redis-compatible) service on 6379, a WSL relay on 5433,
+> and two unrelated projects' dev servers on 8000 and 5173. If you're on a
+> clean machine without those, feel free to remap everything back to the
+> standard ports (and update `cors_allow_origins` in
+> `apps/api/app/core/config.py` to match if you change the frontend's).
 
 Other useful targets: `make lint` (ruff), `make typecheck` (mypy), `make revision m="..."`
 (new Alembic migration). See the [`Makefile`](Makefile) for the full list.
@@ -260,5 +273,43 @@ every span call is a silent no-op without them.
   endpoints also catch any *other* unexpected failure (a mid-call Groq
   timeout, a network blip) the same way — never a raw 500, and the
   `RuntimeError`'s own message never reaches the response body.
+
+### Dashboard
+
+`apps/web/` is a Vite + React 19 + TypeScript SPA (Tailwind v4 for
+styling, `react-router` for routing) — a thin, honest client over the API
+built in Phases 1–7, nothing more:
+
+- **Auth** (`lib/auth.tsx`) — login, token persistence in `localStorage`,
+  a `/auth/me` check on load. No silent-refresh interceptor; a deliberate
+  demo-scale simplification, not an oversight — an expired token just
+  sends you back to `/login`.
+- **Incidents** — list, create, and a detail page whose **Investigate**
+  button drives the real SSE endpoint (`lib/api.ts::investigateStream`,
+  fetch + a manual `ReadableStream` reader, since `EventSource` can't send
+  the `Authorization` header the backend requires) into a live
+  intake → plan → gather → assess → report stage indicator, ending in the
+  rendered diagnosis/confidence/citations or — just as importantly — the
+  backend's clean error message if the LLM isn't configured or fails.
+- **Remediation approval** — the incident detail page lists proposals and,
+  for admin/approver roles, surfaces Approve/Reject buttons wired to the
+  endpoints added alongside this phase (`apps/api/app/api/v1/
+  remediations.py` — there wasn't one before; a static "pending" list with
+  nothing actionable would have been a dead end for the dashboard's
+  "approval" surface the spec calls for).
+- **Memory** — lists semantic/procedural/profile memories, lets a user
+  correct or delete their own, and includes the form that actually
+  exercises `PUT /memories/profile` — the one concrete path to the spec's
+  "engineer prefers concise reports with evidence first" example.
+
+**Verified by actually driving it**, not just a clean `tsc -b`: no
+`chromium-cli` on this native Windows setup, so verification used a
+one-off Playwright script (not a project dependency) to drive a real
+headless Chromium against both dev servers — login → incidents list with
+real seeded data → incident detail → Investigate (correctly rendering the
+backend's 503 live, since no `GROQ_API_KEY` is configured) → remediation
+panel → Memory page, setting and confirming a profile preference
+end-to-end, including watching supersession fire on a second save. Only
+console output was the *expected* 503 — nothing unexpected threw.
 
 Further setup instructions will be filled in as each phase lands.
