@@ -2,11 +2,12 @@ import uuid
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
+import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.llm_client import AgentLLM, build_groq_llm
+from app.agents.llm_client import AgentLLM, LLMNotConfiguredError, build_groq_llm
 from app.core.security import InvalidTokenError, TokenType, decode_token
 from app.db.session import get_db
 from app.models.user import User, UserRole
@@ -43,6 +44,12 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise credentials_error
 
+    # Every log line emitted for the rest of this request now carries
+    # tenant_id/user_id — the audit trail half of tenant isolation
+    # (the enforcement half is each repository's tenant_id WHERE clause).
+    structlog.contextvars.bind_contextvars(
+        tenant_id=str(user.tenant_id), user_id=str(user.id)
+    )
     return user
 
 
@@ -53,8 +60,19 @@ def get_agent_llm() -> AgentLLM:
     """Separate dependency (rather than building it inline in each route) so
     tests can override this with a scripted fake and never need a real
     GROQ_API_KEY to exercise the investigation endpoint.
+
+    Dependency resolution happens before a route's own try/except runs, so
+    a missing API key has to be turned into a clean HTTPException right
+    here — otherwise it reaches the client as a bare 500 with an internal
+    OpenAI SDK stack trace instead of an actionable message.
     """
-    return build_groq_llm()
+    try:
+        return build_groq_llm()
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Investigation service is not configured (missing LLM credentials).",
+        ) from exc
 
 
 AgentLLMDep = Annotated[AgentLLM, Depends(get_agent_llm)]

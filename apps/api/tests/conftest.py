@@ -10,7 +10,13 @@ os.environ["DATABASE_URL"] = os.environ.get(
     "postgresql+asyncpg://opspilot:opspilot@localhost:5545/opspilot_test",
 )
 os.environ.setdefault("ENV", "test")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6399/0")
+# A dedicated logical DB (15), not dev's /0 — rate-limit counters live in
+# Redis, not inside the per-test Postgres transaction rollback, so without
+# this every test would share one counter and later tests would start
+# seeing 429s from earlier tests' calls to the same endpoint.
+os.environ.setdefault(
+    "REDIS_URL", os.environ.get("TEST_REDIS_URL", "redis://localhost:6399/15")
+)
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long")
 os.environ.setdefault("APP_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-long-too")
 # Tests must never ship real spans to Langfuse Cloud. pydantic-settings
@@ -21,6 +27,12 @@ os.environ.setdefault("APP_SECRET_KEY", "test-only-secret-key-at-least-32-bytes-
 # check, which treats an empty string as "not configured").
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
+# Same reasoning, same mechanism, for Groq: tests must never make a real
+# LLM call even if a real key later lands in .env. Tests that need the
+# agent to do anything override `get_agent_llm` with a FakeAgentLLM
+# anyway — this only matters for the one test that deliberately exercises
+# the *real* get_agent_llm dependency's "not configured" fallback.
+os.environ["GROQ_API_KEY"] = ""
 
 import uuid
 
@@ -37,6 +49,20 @@ from app.main import app
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.tools.context import ToolContext
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _flush_test_redis():
+    """Redis state (rate-limit counters today) isn't covered by the
+    per-test Postgres transaction rollback, so it gets its own cleanup:
+    flush the dedicated test DB (REDIS_URL above points at /15) before
+    every test, not just once per session, so tests can't see each
+    other's counters regardless of run order.
+    """
+    from app.core.redis_client import get_redis_client
+
+    await get_redis_client().flushdb()
+    yield
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

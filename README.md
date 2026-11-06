@@ -25,8 +25,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 4 | RAG / retrieval | ✅ Done |
 | 5 | Memory system | ✅ Done |
 | 6 | Langfuse observability | ✅ Done |
-| 7 | API completion (SSE, rate limiting) | ⏳ Next |
-| 8 | React + TypeScript dashboard | Not started |
+| 7 | API completion (SSE, rate limiting) | ✅ Done |
+| 8 | React + TypeScript dashboard | ⏳ Next |
 | 9 | MCP server | Not started |
 | 10 | Evaluation suite + CI quality gate | Not started |
 | 11 | Docker / CI/CD / deployment | Not started |
@@ -223,5 +223,42 @@ real keys are explicitly blanked in `tests/conftest.py` (environment
 variables, not `os.environ.pop`, since pydantic-settings reads `.env`
 directly and would otherwise win), and the suite instead asserts that
 every span call is a silent no-op without them.
+
+### API completion
+
+- **Rate limiting** (`app/core/rate_limit.py`) — a Redis fixed-window
+  counter (`INCR`+`EXPIRE`), the first real use of Redis in this project
+  beyond the readiness check. `/auth/login` and `/auth/register-tenant`
+  are limited by client IP (no user identity exists yet); `/investigate`
+  and `/investigate/stream` share one per-user budget, since they hit the
+  same expensive LLM backend. A 429 carries a `Retry-After` header computed
+  from the key's actual remaining TTL. Tests get their own Redis logical DB
+  (`/15`, flushed before every test) — rate-limit counters live outside the
+  per-test Postgres transaction rollback, so without this later tests would
+  start failing from earlier tests' calls to the same endpoint, which is
+  exactly what happened the first time this was wired up.
+- **SSE streaming** (`stream_investigation` in `graph.py`, `POST
+  /incidents/{id}/investigate/stream`) — the same graph, same bounds, same
+  Langfuse trace, but surfaced via LangGraph's `astream(stream_mode=
+  "updates")` as a `node_complete` event per node and one terminal `report`
+  or `error` event, instead of blocking until the whole investigation
+  finishes. Deliberately POST, not GET+EventSource — this needs a normal
+  `Authorization` header, which `EventSource` can't send.
+- **Tenant isolation, the audit-trail half** — `get_current_user` binds
+  `tenant_id`/`user_id` into structlog's contextvars, so every log line for
+  the rest of that request carries them automatically. (The enforcement
+  half predates this phase: every repository call has always filtered by
+  `tenant_id`, verified by a cross-tenant test in nearly every phase so
+  far.)
+- **Graceful fallback on LLM failure** — caught live, not just in a unit
+  test: with no `GROQ_API_KEY` configured, `ChatOpenAI`'s constructor
+  raises `openai.OpenAIError` *during FastAPI dependency resolution*,
+  before a route's own `try/except` ever runs — so it was reaching the
+  client as a bare 500 with an internal SDK traceback. Fixed by checking
+  for the key explicitly in `build_groq_llm()` and turning that into a
+  clean 503 inside the `get_agent_llm` dependency itself. Both investigate
+  endpoints also catch any *other* unexpected failure (a mid-call Groq
+  timeout, a network blip) the same way — never a raw 500, and the
+  `RuntimeError`'s own message never reaches the response body.
 
 Further setup instructions will be filled in as each phase lands.

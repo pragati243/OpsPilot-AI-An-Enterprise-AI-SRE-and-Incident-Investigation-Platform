@@ -84,11 +84,23 @@ class GroqAgentLLM:
         return parsed
 
 
+class LLMNotConfiguredError(Exception):
+    """Raised instead of letting the OpenAI SDK's generic 'Missing
+    credentials' error surface — that one happens during FastAPI dependency
+    resolution, before a route's own try/except ever runs, so it would
+    otherwise reach the client as a bare 500 with an internal stack trace.
+    """
+
+
 def build_groq_llm() -> GroqAgentLLM:
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
 
     settings = get_settings()
+    if not settings.groq_api_key:
+        raise LLMNotConfiguredError(
+            "GROQ_API_KEY is not set — the investigation endpoints need it to call Groq."
+        )
     chat_model = ChatOpenAI(
         model=settings.groq_model,
         api_key=SecretStr(settings.groq_api_key),

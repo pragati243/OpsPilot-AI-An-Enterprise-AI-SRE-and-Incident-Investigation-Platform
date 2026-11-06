@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import CurrentUser, DbSession
+from app.core.rate_limit import rate_limit_by_client
 from app.core.security import InvalidTokenError
 from app.schemas.auth import (
     LoginRequest,
@@ -20,7 +21,14 @@ from app.services.auth_service import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register-tenant", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register-tenant",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[
+        Depends(rate_limit_by_client(limit=5, window_seconds=60, scope="register_tenant"))
+    ],
+)
 async def register_tenant(payload: RegisterTenantRequest, db: DbSession) -> UserRead:
     """Bootstrap a new workspace: creates a tenant and its first admin user."""
     service = AuthService(db)
@@ -43,7 +51,11 @@ async def register_tenant(payload: RegisterTenantRequest, db: DbSession) -> User
     return UserRead.model_validate(admin)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limit_by_client(limit=10, window_seconds=60, scope="login"))],
+)
 async def login(payload: LoginRequest, db: DbSession) -> TokenResponse:
     service = AuthService(db)
     try:

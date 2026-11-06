@@ -1,4 +1,7 @@
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -89,3 +92,55 @@ async def run_investigation(
 
         root_span.update(output=report.model_dump(mode="json"))
         return report
+
+
+@dataclass(frozen=True)
+class InvestigationStreamEvent:
+    event: str  # "node_complete" | "report" | "error"
+    data: dict[str, Any]
+
+
+async def stream_investigation(
+    ctx: ToolContext, incident_id: uuid.UUID, llm: AgentLLM
+) -> AsyncIterator[InvestigationStreamEvent]:
+    """Same graph, same bounds, same tracing as run_investigation — this
+    surfaces progress as it happens instead of blocking until the whole
+    investigation finishes, so an SSE client can show "gathering
+    evidence..." rather than a blank wait for however long the LLM round
+    trips take.
+    """
+    compiled = build_graph(ctx, llm)
+    config = {
+        "configurable": {"thread_id": str(incident_id)},
+        "recursion_limit": _RECURSION_LIMIT,
+    }
+    with investigation_trace(
+        tenant_id=ctx.tenant_id, user_id=ctx.user.id, incident_id=incident_id
+    ) as root_span:
+        try:
+            async for update in compiled.astream(  # type: ignore[call-overload]
+                {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "incident_id": incident_id},
+                config=config,
+                stream_mode="updates",
+            ):
+                for node_name, node_output in update.items():
+                    yield InvestigationStreamEvent(event="node_complete", data={"node": node_name})
+
+                    if node_name == "intake" and node_output.get("error"):
+                        root_span.update(level="ERROR", status_message=node_output["error"])
+                        yield InvestigationStreamEvent(
+                            event="error", data={"message": node_output["error"]}
+                        )
+                        return
+
+                    if node_name == "report" and node_output.get("report") is not None:
+                        report = node_output["report"]
+                        root_span.update(output=report.model_dump(mode="json"))
+                        yield InvestigationStreamEvent(
+                            event="report", data=report.model_dump(mode="json")
+                        )
+        except Exception as exc:
+            root_span.update(level="ERROR", status_message=str(exc))
+            yield InvestigationStreamEvent(
+                event="error", data={"message": "investigation failed unexpectedly"}
+            )
