@@ -1,4 +1,4 @@
-.PHONY: up down logs sync dev migrate revision seed-demo test lint typecheck
+.PHONY: up down logs sync dev mcp-dev migrate revision seed-demo test lint typecheck
 
 up: ## Start Postgres + Redis for local dev
 	docker compose up -d postgres redis
@@ -17,6 +17,11 @@ sync: ## Install/sync Python dependencies into .venv
 dev: ## Run the FastAPI app with autoreload
 	uv run uvicorn app.main:app --reload --app-dir apps/api --port 8010
 
+# Port 8020: 8000/8010 (API) and 5173/5180 (dashboard) are already taken
+# on this dev machine, same reasoning as apps/api's own port move.
+mcp-dev: ## Run the MCP server (Streamable HTTP) for local dev
+	uv run python apps/mcp-server/server.py
+
 migrate: ## Apply Alembic migrations
 	cd apps/api && uv run --project .. alembic upgrade head
 
@@ -34,4 +39,4 @@ lint: ## Ruff lint
 	uv run ruff check .
 
 typecheck: ## mypy
-	uv run mypy apps/api/app
+	uv run mypy apps/api/app apps/mcp-server

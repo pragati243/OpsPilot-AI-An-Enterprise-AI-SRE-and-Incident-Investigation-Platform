@@ -46,6 +46,22 @@ class DocumentRepository:
             if not doc.access_scope or set(doc.access_scope) & allowed_scopes
         ]
 
+    async def get_by_id(
+        self, *, tenant_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document | None:
+        """Tenant-scoped only — same pattern as every other repository's
+        get_by_id. ACL (access_scope) is a finer-grained check the caller
+        makes itself, same as `search` leaves it to the caller's
+        `allowed_scopes`, so there's one place that owns "what scopes can
+        this user see" (app/guardrails/access_scope.py) rather than two.
+        """
+        result = await self._session.execute(
+            select(Document).where(
+                Document.tenant_id == tenant_id, Document.id == document_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         *,

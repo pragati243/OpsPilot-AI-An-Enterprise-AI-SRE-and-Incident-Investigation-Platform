@@ -27,8 +27,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 6 | Langfuse observability | ✅ Done |
 | 7 | API completion (SSE, rate limiting) | ✅ Done |
 | 8 | React + TypeScript dashboard | ✅ Done |
-| 9 | MCP server | ⏳ Next |
-| 10 | Evaluation suite + CI quality gate | Not started |
+| 9 | MCP server | ✅ Done |
+| 10 | Evaluation suite + CI quality gate | ⏳ Next |
 | 11 | Docker / CI/CD / deployment | Not started |
 
 ## Repository layout
@@ -65,6 +65,13 @@ cd apps/web
 cp .env.example .env          # points at the API; default matches make dev's :8010
 npm install
 npm run dev                   # http://localhost:5180
+```
+
+And, optionally, the MCP server for tool-using clients (an IDE assistant, another
+agent) — it needs the same API running for its DB/auth, nothing extra of its own:
+
+```bash
+make mcp-dev                  # Streamable HTTP on :8020
 ```
 
 Run the test suite (spins up an ephemeral, tmpfs-backed test Postgres):
@@ -311,5 +318,54 @@ backend's 503 live, since no `GROQ_API_KEY` is configured) → remediation
 panel → Memory page, setting and confirming a profile preference
 end-to-end, including watching supersession fire on a second save. Only
 console output was the *expected* 503 — nothing unexpected threw.
+
+### MCP server
+
+`apps/mcp-server/` exposes the same 5 read-only diagnostic/knowledge tools
+(`get_service_health`, `query_logs`, `get_service_metrics`, `search_runbooks`,
+`search_past_incidents`) to any MCP client over Streamable HTTP — an IDE
+assistant, a chat client, another agent — rather than just the LangGraph
+workflow built in Phase 3. It's a thin sibling app, not a second backend:
+`bootstrap.py` puts `apps/api` on `sys.path` so every tool call runs the exact
+same `apps/api/app/tools/` functions, `ToolContext`, and Postgres connection
+the REST API and the agent already use — no duplicated logic, no second
+schema to drift.
+
+- **Auth** (`auth.py::authenticated_tool_context`) — an MCP client sends the
+  same `Authorization: Bearer <access_token>` it would send the REST API
+  (`Context.headers`, which the SDK's own docstring is explicit is
+  client-supplied input, never trusted without `decode_token` verifying the
+  signature). There's deliberately no second login flow or API-key system —
+  one JWT, one set of tenant/role claims, for both surfaces.
+- **Tools** (`diagnostics_tools.py`, `knowledge_tools.py`) — each one builds
+  the same Pydantic input the HTTP layer builds, calls the existing tool
+  function with an authenticated `ToolContext`, and returns a `dict[str,
+  Any]` (the specific generic, not a bare `dict` — the SDK only derives a
+  structured-output schema, and so only populates `structured_content`, for
+  an annotation it can actually turn into a schema). A domain failure (unknown
+  service, bad `time_window`) or an auth failure is re-raised as `mcp.ToolError`
+  (`auth.py::call_tool_fn`) so the client sees the real message instead of a
+  generic "Error executing tool" crash string.
+- **Resource template** (`knowledge_tools.py::read_runbook`,
+  `runbook://{document_id}`) — `search_runbooks` returns a `document_id` per
+  match; a client fetches the full text on demand instead of every search
+  result paying for full-content transfer upfront. An unknown id, a
+  wrong-tenant id, and an ACL-denied id all raise the same
+  `ResourceNotFoundError` — deliberately indistinguishable, same reasoning as
+  `ServiceNotFoundError` elsewhere in the tool layer.
+
+**Verified over the real protocol, not by calling the tool functions
+directly**: `apps/mcp-server/tests/test_mcp_server.py` spins up the actual
+`uvicorn` ASGI app (a bare in-process ASGI transport doesn't drive the
+lifespan protocol the SDK's `StreamableHTTPSessionManager` needs to start, so
+only a real running server exercises this honestly) and drives it with the
+MCP SDK's own `ClientSession` over `streamable_http_client` — real
+`initialize`, real `tools/list`, real `tools/call`, real `resources/read` —
+against real seeded Postgres rows and a real signed JWT. It covers: the tool
+roster, a missing-token call failing cleanly, a real authenticated call
+returning real structured data, an unknown-service call failing with the
+actual tool error message (not a crash), and the search → resource-read
+round trip. 115/115 backend tests pass (109 from Phases 1–8 plus 6 new here),
+`ruff` and `mypy` clean on `apps/mcp-server` too.
 
 Further setup instructions will be filled in as each phase lands.
