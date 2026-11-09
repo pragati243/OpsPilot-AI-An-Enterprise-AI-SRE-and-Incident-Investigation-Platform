@@ -29,7 +29,7 @@ This repository is built strictly phase-by-phase against that spec.
 | 8 | React + TypeScript dashboard | ✅ Done |
 | 9 | MCP server | ✅ Done |
 | 10 | Evaluation suite + CI quality gate | ✅ Done |
-| 11 | Docker / CI/CD / deployment | ⏳ Next |
+| 11 | Docker / CI/CD / deployment | 🔧 Config built & locally verified — live deploy pending account setup |
 
 ## Repository layout
 
@@ -404,5 +404,46 @@ tool call logs — fixed by explicitly calling `configure_logging()` with
 `ENV=test`, which switches it to the ASCII-safe JSON renderer; not a bug
 in the eval logic itself, confirmed by the one category that makes no
 tool calls — `unauthorized_request` — passing before the fix landed).
+
+### Deployment
+
+Full instructions: [`docs/deployment.md`](docs/deployment.md). Target is
+Render (API, MCP server, dashboard, Redis) + [Neon](https://neon.tech) for
+Postgres — two providers, not one, because Render's free Postgres expires
+30 days after creation (14-day grace period, then deleted), which is wrong
+for a demo meant to stay up; Neon's free tier has no such expiry and
+supports pgvector on every plan.
+
+- **`apps/api/Dockerfile`, `apps/mcp-server/Dockerfile`** — both use the
+  official `uv` Docker image to install from the repo-root
+  `pyproject.toml`/`uv.lock` with `--frozen --no-dev`, then run a
+  migrate-then-serve entrypoint (`alembic upgrade head` on every
+  container start — idempotent, so no separate "pre-deploy" hook is
+  needed, which matters because Render's free tier doesn't offer one).
+  `apps/mcp-server`'s image copies `apps/api` alongside it, preserving
+  them as siblings, because `bootstrap.py`'s `sys.path` insert is
+  relative to its own file location — same layout as local dev.
+- **[`render.yaml`](render.yaml)** — a Blueprint defining both Docker web
+  services, a free Key Value (Redis) instance, and a static site for
+  `apps/web`. `DATABASE_URL` is deliberately `sync: false` (filled in
+  manually with the Neon connection string, never committed). Every
+  service's `autoDeployTrigger` is `checksPass`, not `commit` — Render
+  won't deploy a commit until GitHub reports `.github/workflows/ci.yml`
+  green, so the Phase 10 quality gate is what decides whether a push to
+  `main` goes live, not a separate deploy step.
+
+**Verified locally before handing off account creation**: both
+Dockerfiles were built and run for real against the actual dev
+Postgres/Redis containers (not just `docker build` succeeding) —
+`opspilot-api`'s container ran real Alembic migrations on startup, served
+a real `/healthz` 200, and completed a real login against the seeded
+demo tenant returning real JWTs; `opspilot-mcp`'s container started its
+`StreamableHTTPSessionManager` and returned a real protocol-level 400 for
+a malformed MCP request (not a hang or a connection refusal). The
+Neon `?ssl=require` connection-string detail in `docs/deployment.md` (not
+`?sslmode=require`, which asyncpg rejects) was confirmed against
+SQLAlchemy's asyncpg dialect behavior before being written down, not
+assumed. The actual public URLs are not live yet — that needs a Neon
+project and a Render account, which only the project owner can create.
 
 Further setup instructions will be filled in as each phase lands.

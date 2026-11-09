@@ -1,0 +1,100 @@
+# Render Blueprint for OpsPilot AI.
+#
+# Postgres is deliberately NOT defined here — Render's free Postgres
+# expires 30 days after creation (then a 14-day grace period before
+# deletion), which is wrong for a demo meant to stay up. DATABASE_URL
+# instead points at a Neon.tech project (free, no expiry, pgvector
+# supported on every plan) — see docs/deployment.md for the exact setup
+# steps. Redis stays on Render (free Key Value, 25MB, in-memory only —
+# fine for rate-limit counters, which don't need to survive a restart).
+#
+# autoDeployTrigger: checksPass means Render deploys a commit only once
+# GitHub reports its CI check (.github/workflows/ci.yml) as passing — the
+# quality gate built in Phase 10 (lint, typecheck, tests, the 32-case eval
+# suite) is what decides whether a push to main actually goes live, not
+# just "it built."
+
+envVarGroups:
+  - name: opspilot-shared-secrets
+    envVars:
+      # Same JWT signing secret for both services — the MCP server
+      # verifies tokens the API issued, so these must be identical, not
+      # independently generated per service.
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: APP_SECRET_KEY
+        sync: false
+
+services:
+  - name: opspilot-api
+    type: web
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: opspilot-shared-secrets
+      - key: ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # Neon connection string — see docs/deployment.md
+      - key: CORS_ALLOW_ORIGINS
+        value: '["https://opspilot-web.onrender.com"]'
+      - key: REDIS_URL
+        fromService:
+          name: opspilot-redis
+          type: keyvalue
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false # optional — investigate endpoints 503 cleanly without it
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false # optional — tracing is a no-op without it
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+
+  - name: opspilot-mcp
+    type: web
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./apps/mcp-server/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: opspilot-shared-secrets
+      - key: ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # same Neon connection string as opspilot-api
+      - key: REDIS_URL
+        fromService:
+          name: opspilot-redis
+          type: keyvalue
+          property: connectionString
+
+  - name: opspilot-redis
+    type: keyvalue
+    plan: free
+    region: oregon
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: allow-all (only the two web services above use it)
+    maxmemoryPolicy: allkeys-lru
+
+  - name: opspilot-web
+    type: web
+    runtime: static
+    rootDir: apps/web
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeployTrigger: checksPass
+    envVars:
+      # Vite bakes this into the JS bundle at build time, not read at
+      # runtime — must point at opspilot-api's real Render URL.
+      - key: VITE_API_BASE_URL
+        value: https://opspilot-api.onrender.com
