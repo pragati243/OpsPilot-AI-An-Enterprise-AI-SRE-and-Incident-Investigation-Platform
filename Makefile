@@ -1,4 +1,4 @@
-.PHONY: up down logs sync dev mcp-dev migrate revision seed-demo test lint typecheck
+.PHONY: up down logs sync dev mcp-dev migrate revision seed-demo test evals lint typecheck
 
 up: ## Start Postgres + Redis for local dev
 	docker compose up -d postgres redis
@@ -35,8 +35,11 @@ test: ## Run the backend test suite against the ephemeral test Postgres
 	docker compose --profile test up -d postgres-test redis
 	uv run pytest
 
+evals: ## Run the golden evaluation dataset (CI quality gate) — needs DATABASE_URL reachable
+	uv run python evals/run_evals.py
+
 lint: ## Ruff lint
 	uv run ruff check .
 
 typecheck: ## mypy
-	uv run mypy apps/api/app apps/mcp-server
+	uv run mypy apps/api/app apps/mcp-server evals

@@ -28,8 +28,8 @@ This repository is built strictly phase-by-phase against that spec.
 | 7 | API completion (SSE, rate limiting) | ✅ Done |
 | 8 | React + TypeScript dashboard | ✅ Done |
 | 9 | MCP server | ✅ Done |
-| 10 | Evaluation suite + CI quality gate | ⏳ Next |
-| 11 | Docker / CI/CD / deployment | Not started |
+| 10 | Evaluation suite + CI quality gate | ✅ Done |
+| 11 | Docker / CI/CD / deployment | ⏳ Next |
 
 ## Repository layout
 
@@ -367,5 +367,42 @@ returning real structured data, an unknown-service call failing with the
 actual tool error message (not a crash), and the search → resource-read
 round trip. 115/115 backend tests pass (109 from Phases 1–8 plus 6 new here),
 `ruff` and `mypy` clean on `apps/mcp-server` too.
+
+### Evaluation suite
+
+`evals/` ([full README](evals/README.md)) is 32 golden cases across the 8
+scenario categories `docs/architecture.md` calls for (known incident, missing
+evidence, historical repeat, conflicting incidents, unauthorized request,
+prompt injection, tool timeout, dangerous remediation), run via
+`make evals` / `uv run python evals/run_evals.py` and wired into CI as its
+own quality-gate step (`.github/workflows/ci.yml`), separate from the
+pytest suite.
+
+Every case runs the *real* LangGraph workflow (`run_investigation`) against
+a real, disposable Postgres tenant seeded just for the run — but drives it
+with a scripted `RecordingFakeAgentLLM` rather than a real model call, on
+purpose: these 32 deterministic checks verify the **pipeline's** handling of
+each scenario shape (citations/persistence round-tripping, tenant isolation,
+approval-gating, bounded execution, faithful evidence surfacing), not
+whether a real model's *judgment* would be correct unaided — grading that
+needs LLM-as-judge metrics calibrated against human-reviewed transcripts,
+which the spec explicitly scopes as a later addition, and which (like every
+other real-Groq path in this project) is unverified while `GROQ_API_KEY`
+remains unset. See `evals/README.md` for exactly what each category does and
+doesn't claim to prove.
+
+**Verified live**, not just read for internal consistency: a real run
+against dev Postgres passes 32/32 cases (128/128 individual checks) in
+~12s, confirmed clean before and after each fix — including one genuine
+dataset bug caught this way (four cases on the same seeded service pushed
+an older fixture incident past `search_past_incidents`'s default
+`limit=5` once enough eval-created incidents piled up; fixed by raising
+`limit` on those specific tool calls) and one environment-only crash
+(structlog's default dev console renderer emits Unicode decoration that
+`UnicodeEncodeError`s on this Windows terminal's codepage the moment any
+tool call logs — fixed by explicitly calling `configure_logging()` with
+`ENV=test`, which switches it to the ASCII-safe JSON renderer; not a bug
+in the eval logic itself, confirmed by the one category that makes no
+tool calls — `unauthorized_request` — passing before the fix landed).
 
 Further setup instructions will be filled in as each phase lands.

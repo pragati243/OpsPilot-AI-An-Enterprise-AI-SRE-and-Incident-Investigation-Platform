@@ -36,9 +36,14 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://opspilot:opspilot@localhost:5433/opspilot_test
       TEST_DATABASE_URL: postgresql+asyncpg://opspilot:opspilot@localhost:5433/opspilot_test
-      REDIS_URL: redis://localhost:6379/0
+      # TEST_REDIS_URL, not REDIS_URL: apps/api/tests/conftest.py only
+      # *defaults* REDIS_URL from this if REDIS_URL isn't already set, so
+      # tests land on their own isolated db (15) instead of sharing one
+      # rate-limit counter with anything else that touches db 0.
+      TEST_REDIS_URL: redis://localhost:6379/15
       JWT_SECRET_KEY: ci-test-secret-key-at-least-32-bytes-long
       APP_SECRET_KEY: ci-test-secret-key-at-least-32-bytes-long-too
+      ENV: test
 
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +63,20 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check
-        run: uv run mypy apps/api/app
+        run: uv run mypy apps/api/app apps/mcp-server evals
 
       - name: Run migrations
         run: uv run --directory apps/api alembic upgrade head
 
       - name: Run tests
         run: uv run pytest --maxfail=1
+
+      - name: Run golden evaluation dataset (quality gate)
+        run: uv run python evals/run_evals.py --json-out eval-report.json
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report.json
